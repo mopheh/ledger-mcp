@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Env / secrets
+.env
+.env.local
+.env.*.local
+
+# Neon
+.neon
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
+
+# Local tool state
+.claude/

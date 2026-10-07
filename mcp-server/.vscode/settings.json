@@ -1,0 +1,4 @@
+{
+    "python-envs.defaultEnvManager": "ms-python.python:venv",
+    "python.defaultInterpreterPath": "/Users/mac/Desktop/learning/ledger-mcp/mcp-server/.venv/bin/python3"
+}
