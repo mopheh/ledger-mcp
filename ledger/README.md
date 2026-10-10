@@ -46,12 +46,36 @@ Interactive docs are at `/docs` when the server is running.
 
 The deposit route has no payment step behind it. Any signed-in user can mint funds into their own account. That is fine for manual testing, but it needs to be removed or restricted before real use.
 
+## MCP server
+
+`app/mcp_server.py` exposes the API to AI clients such as Claude over stdio. It is a thin client of the running API and authenticates with an API key, so ownership checks and idempotency are enforced by the API itself.
+
+| Tool | What it does |
+|---|---|
+| `check_balance` | balance of one of your accounts; `account_id` can be omitted if you have exactly one |
+| `transfer` | move money from one of your accounts to another account by account number |
+
+`transfer` generates an idempotency key when none is given and returns it. To retry a failed or uncertain call, pass the same key again so the money moves only once.
+
+To use it, start the API, create an API key with `POST /auth/generate-api-key`, then register the server with your client. For Claude Code:
+
+```
+claude mcp add ledger \
+  -e LEDGER_API_KEY=sk_... \
+  -e LEDGER_API_URL=http://127.0.0.1:8000 \
+  -e PYTHONPATH=/path/to/ledger \
+  -- /path/to/ledger/app/.venv/bin/python -m app.mcp_server
+```
+
+`LEDGER_API_URL` defaults to `http://127.0.0.1:8000`. The server needs the API running, and the key belongs to one user, so the tools only see that user's accounts. It can move real balances, so use a key for an account you are willing to test with.
+
 ## Layout
 
 ```
 app/
   main.py                 FastAPI app and router wiring
   seed.py                 creates the system account(s)
+  mcp_server.py           MCP server (stdio) for AI clients
   core/                   settings and database session
   modules/
     users/                sign-up, sign-in, JWT
