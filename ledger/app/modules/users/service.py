@@ -12,7 +12,7 @@ from app.core.database import get_session
 from app.modules.users.models import User
 from app.modules.users.schemas import SignInRequest, SignUpRequest
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/users/sign-in")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/users/token")
 
 
 def hash_password(password: str) -> str:

@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, status
+from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
@@ -27,6 +28,18 @@ async def sign_up(data: SignUpRequest, session: AsyncSession = Depends(get_sessi
 async def sign_in(data: SignInRequest, session: AsyncSession = Depends(get_session)):
     token = await service.sign_in(session, data)
     return TokenResponse(access_token=token)
+
+
+@router.post("/token", response_model=TokenResponse, include_in_schema=True)
+async def token(
+    form: OAuth2PasswordRequestForm = Depends(),
+    session: AsyncSession = Depends(get_session),
+):
+    """OAuth2 password flow for Swagger's Authorize button. `username` is the email."""
+    access_token = await service.sign_in(
+        session, SignInRequest(email=form.username, password=form.password)
+    )
+    return TokenResponse(access_token=access_token)
 
 
 @router.get("/me", response_model=UserResponse)
