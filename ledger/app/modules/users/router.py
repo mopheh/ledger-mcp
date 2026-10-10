@@ -34,6 +34,9 @@ async def read_current_user(current_user: User = Depends(service.get_current_use
     return current_user
 
 @router.get("/list-users", response_model=list[UserResponse])
-async def list_users(session: AsyncSession = Depends(get_session)):
+async def list_users(
+    session: AsyncSession = Depends(get_session),
+    _: User = Depends(service.get_current_user),
+):
     users = await service.list_users(session)
     return users

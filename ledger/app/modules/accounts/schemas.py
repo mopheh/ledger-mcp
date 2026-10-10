@@ -1,22 +1,28 @@
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
-from app.modules.accounts.models import TransactionType
+from app.modules.accounts.models import AccountType, TransactionType
 
 
 class AccountCreate(BaseModel):
-    user_id: int
     accountNumber: str
     currency: str
-    accountType: str
+    accountType: AccountType = AccountType.USER
+
+    @field_validator("accountType")
+    @classmethod
+    def no_system_accounts(cls, v: AccountType) -> AccountType:
+        if v == AccountType.SYSTEM:
+            raise ValueError("System accounts cannot be created via the API")
+        return v
 
 
 class AccountRead(BaseModel):
     id: int
     accountNumber: str
     currency: str
-    accountType: str
+    accountType: AccountType
     balance: int
 
     class Config:

@@ -1,6 +1,7 @@
 import enum
 from datetime import datetime, timezone
 
+from sqlalchemy import Enum as SAEnum
 from sqlmodel import SQLModel, Field, UniqueConstraint
 
 
@@ -8,6 +9,10 @@ class TransactionType(str, enum.Enum):
     DEPOSIT = "deposit"
     WITHDRAWAL = "withdrawal"
     TRANSFER = "transfer"
+
+class AccountType(str, enum.Enum):
+    USER = "user"
+    SYSTEM = "system"
 
 
 class Account(SQLModel, table=True):
@@ -17,9 +22,18 @@ class Account(SQLModel, table=True):
     id: int  = Field(default=None, primary_key=True)
     accountNumber: str = Field(index=True, unique=True)
     currency: str = Field(index=True)
-    accountType: str = Field(index=True)
+    # Stored as VARCHAR holding the enum *values* ("user"/"system"), not names.
+    accountType: AccountType = Field(
+        sa_type=SAEnum(
+            AccountType,
+            native_enum=False,
+            length=32,
+            values_callable=lambda e: [m.value for m in e],
+        ),
+        index=True,
+    )
     balance: int = Field(default=0)
-    user_id: int = Field(foreign_key="user.id", index=True)
+    user_id: int = Field(foreign_key="user.id", index=True, nullable=True)
 
 
 class Transaction(SQLModel, table=True):

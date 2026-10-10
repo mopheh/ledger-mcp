@@ -5,9 +5,11 @@ from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.modules.accounts.models import Account, Transaction, TransactionType
+from app.modules.accounts.models import Account, AccountType, Transaction, TransactionType
 from app.modules.accounts.schemas import AccountCreate
 from app.modules.users.models import User
+from app.modules.ledger_entries.models import LedgerEntry
+from app.modules.ledger_entries.schema import LedgerDirection
 
 async def check_balance(session: AsyncSession, account_id: int, auth_user: User) -> int:
     if account_id is None:
@@ -41,14 +43,29 @@ async def create_account(session: AsyncSession, data: AccountCreate, auth_user: 
     await session.refresh(account)
     return account
 
+async def get_system_account(session: AsyncSession, currency: str) -> Account:
+    results = await session.execute(
+        select(Account).where(
+            Account.accountType == AccountType.SYSTEM, Account.currency == currency
+        )
+    )
+    result = results.scalars().first()
+    if not result:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"No system account found for currency {currency}",
+        )
+    return result
+
 
 async def get_account(session: AsyncSession, account_id: int, auth_user: User | None = None) -> Account:
     account = await session.get(Account, account_id)
     if not account:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
-    # auth_user is optional: internal callers (deposit/withdraw) skip the
-    # ownership check, request-scoped callers pass the authenticated user.
+    
     if auth_user is not None and account.user_id != auth_user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
+    if account.accountType == AccountType.SYSTEM and auth_user is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
     return account
 
@@ -62,8 +79,10 @@ async def get_account_by_number(
     return result.scalars().first()
 
 
-async def list_accounts(session: AsyncSession) -> list[Account]:
-    result = await session.execute(select(Account))
+async def list_accounts(session: AsyncSession, auth_user: User) -> list[Account]:
+    result = await session.execute(
+        select(Account).where(Account.user_id == auth_user.id)
+    )
     return list(result.scalars().all())
 
 
@@ -73,14 +92,39 @@ async def deposit(session: AsyncSession, account_id: int, amount: int) -> Accoun
             status.HTTP_400_BAD_REQUEST, "Deposit amount must be positive"
         )
 
-    account = await get_account(session, account_id)
+    account = await lock_accounts(session, account_id)
+    if account.accountType == AccountType.SYSTEM:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "Cannot deposit into a system account"
+        )
+    system_account = await get_system_account(session, account.currency)
+    system_locked = await lock_accounts(session, system_account.id)
     account.balance += amount
+    system_locked.balance -= amount
     session.add(account)
+    transaction = Transaction(
+                idempotency_key=str(uuid4()),
+                type=TransactionType.DEPOSIT,
+                to_account_id=account_id,
+                amount=amount,
+            )
     session.add(
-        Transaction(
-            idempotency_key=str(uuid4()),
-            type=TransactionType.DEPOSIT,
-            to_account_id=account_id,
+        transaction
+    )
+    await session.flush()  # Ensure transaction.id is populated before creating ledger entries
+    session.add(
+        LedgerEntry(
+            account_id=system_locked.id,
+            transaction_id=transaction.id,
+            direction=LedgerDirection.debit,
+            amount=amount,
+        )
+    )
+    session.add(
+        LedgerEntry(
+            account_id=account.id,
+            transaction_id=transaction.id,
+            direction=LedgerDirection.credit,
             amount=amount,
         )
     )
@@ -95,17 +139,41 @@ async def withdraw(session: AsyncSession, account_id: int, amount: int) -> Accou
             status.HTTP_400_BAD_REQUEST, "Withdrawal amount must be positive"
         )
 
-    account = await get_account(session, account_id)
+    account = await lock_accounts(session, account_id)
     if account.balance < amount:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Insufficient funds")
-
+    if account.accountType == AccountType.SYSTEM:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "Cannot withdraw from a system account"
+        )
+    system_account = await get_system_account(session, account.currency)
+    system_locked = await lock_accounts(session, system_account.id)
     account.balance -= amount
+    system_locked.balance += amount
     session.add(account)
-    session.add(
-        Transaction(
+    transaction = Transaction(
             idempotency_key=str(uuid4()),
             type=TransactionType.WITHDRAWAL,
             from_account_id=account_id,
+            amount=amount,
+        )
+    session.add(
+        transaction
+    )
+    await session.flush()  # Ensure transaction.id is populated before creating ledger entries
+    session.add(
+        LedgerEntry(
+            account_id=account.id,
+            transaction_id=transaction.id,
+            direction=LedgerDirection.debit,
+            amount=amount,
+        )
+    )
+    session.add(
+        LedgerEntry(
+            account_id=system_locked.id,
+            transaction_id=transaction.id,
+            direction=LedgerDirection.credit,
             amount=amount,
         )
     )
@@ -115,7 +183,7 @@ async def withdraw(session: AsyncSession, account_id: int, amount: int) -> Accou
 
 
 async def lock_accounts(session: AsyncSession, account_id: int) -> Account:
-    # Sort account IDs to prevent deadlocks
+
     account = await session.get(Account, account_id, with_for_update=True)
     if not account:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
@@ -159,6 +227,10 @@ async def transfer(session: AsyncSession, from_account_id: int, to_account_id: i
     locked = {firstId: await lock_accounts(session, firstId), secondId: await lock_accounts(session, secondId)}
     from_account = locked[from_account_id]
     to_account = locked[to_account_id]
+    if from_account.accountType == AccountType.SYSTEM or to_account.accountType == AccountType.SYSTEM:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "Cannot transfer to or from a system account"
+        )
 
     if from_account.currency != to_account.currency:
         raise HTTPException(
@@ -185,13 +257,31 @@ async def transfer(session: AsyncSession, from_account_id: int, to_account_id: i
 
     session.add(from_account)
     session.add(to_account)
-    session.add(record)
+    
+   
 
     try:
+        session.add(record)
+        await session.flush()  # Ensure record.id is populated before creating ledger entries
+        session.add(
+                LedgerEntry(
+                    account_id=from_account.id,
+                    transaction_id=record.id,
+                    direction=LedgerDirection.debit,
+                    amount=amount,
+                )
+            )
+        session.add(
+                LedgerEntry(
+                    account_id=to_account.id,
+                    transaction_id=record.id,
+                    direction=LedgerDirection.credit,
+                    amount=amount,
+                )
+            )
         await session.commit()
     except IntegrityError:
-        # A concurrent request with the same idempotency key committed
-        # first; our balance changes roll back with it atomically.
+        
         await session.rollback()
         existing = await get_transaction_by_idempotency_key(session, idempotency_key)
         if existing:
