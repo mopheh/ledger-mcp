@@ -2,6 +2,7 @@ import enum
 from datetime import datetime, timezone
 
 from sqlalchemy import Enum as SAEnum
+from sqlalchemy import CheckConstraint
 from sqlmodel import SQLModel, Field, UniqueConstraint
 
 
@@ -17,7 +18,14 @@ class AccountType(str, enum.Enum):
 
 class Account(SQLModel, table=True):
     __tablename__ = "accounts"
-    __table_args__ = (UniqueConstraint("accountType", "user_id", "currency", name="uq_user_account_type"),                )
+    __table_args__ = (
+        UniqueConstraint("accountType", "user_id", "currency", name="uq_user_account_type"),
+        # Only system accounts may go negative (they mirror all user deposits).
+        CheckConstraint(
+            """balance >= 0 OR "accountType" = 'system'""",
+            name="ck_accounts_balance_non_negative",
+        ),
+    )
 
     id: int  = Field(default=None, primary_key=True)
     accountNumber: str = Field(index=True, unique=True)
@@ -38,9 +46,18 @@ class Account(SQLModel, table=True):
 
 class Transaction(SQLModel, table=True):
     __tablename__ = "transactions"
+    # Keys are scoped per user: two users may reuse the same key string.
+    __table_args__ = (
+        UniqueConstraint(
+            "initiated_by_user_id",
+            "idempotency_key",
+            name="uq_transactions_user_idempotency_key",
+        ),
+        CheckConstraint("amount > 0", name="ck_transactions_amount_positive"),
+    )
 
     id: int | None = Field(default=None, primary_key=True)
-    idempotency_key: str = Field(index=True, unique=True)
+    idempotency_key: str = Field(index=True)
     type: TransactionType
     from_account_id: int | None = Field(default=None, foreign_key="accounts.id")
     to_account_id: int | None = Field(default=None, foreign_key="accounts.id")

@@ -31,6 +31,8 @@ class AccountRead(BaseModel):
 
 class AccountTransaction(BaseModel):
     amount: int
+    # Retrying a request with the same key returns the original result.
+    idempotency_key: str
 
 
 class TransferRequest(BaseModel):

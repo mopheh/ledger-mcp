@@ -61,7 +61,9 @@ async def deposit(
 ):
     """Fund one of your own accounts (counter-entry on the system account)."""
     await service.get_account(session, account_id, auth_user)  # ownership check
-    return await service.deposit(session, account_id, data.amount)
+    return await service.deposit(
+        session, account_id, data.amount, data.idempotency_key, auth_user.id
+    )
 
 
 @router.post("/{account_id}/withdraw", response_model=AccountRead)
@@ -72,7 +74,9 @@ async def withdraw(
     auth_user: User = Depends(get_current_user),
 ):
     await service.get_account(session, account_id, auth_user)  # ownership check
-    return await service.withdraw(session, account_id, data.amount)
+    return await service.withdraw(
+        session, account_id, data.amount, data.idempotency_key, auth_user.id
+    )
 
 
 @router.post("/transfer", response_model=TransactionRead)

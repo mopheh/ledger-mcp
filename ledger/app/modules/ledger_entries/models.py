@@ -1,3 +1,4 @@
+from sqlalchemy import CheckConstraint
 from sqlmodel import Field, SQLModel
 from datetime import datetime, timezone
 
@@ -5,6 +6,8 @@ from app.modules.ledger_entries.schema import LedgerDirection
 
 class LedgerEntry(SQLModel, table=True):
     __tablename__ = "ledger_entries"
+    # Append-only: a database trigger rejects UPDATE/DELETE/TRUNCATE (see migrations).
+    __table_args__ = (CheckConstraint("amount > 0", name="ck_ledger_entries_amount_positive"),)
     id: int | None = Field(default=None, primary_key=True)
     account_id: int = Field(foreign_key="accounts.id")
     transaction_id: int = Field(foreign_key="transactions.id")

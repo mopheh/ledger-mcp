@@ -86,11 +86,22 @@ async def list_accounts(session: AsyncSession, auth_user: User) -> list[Account]
     return list(result.scalars().all())
 
 
-async def deposit(session: AsyncSession, account_id: int, amount: int) -> Account:
+async def deposit(
+    session: AsyncSession,
+    account_id: int,
+    amount: int,
+    idempotency_key: str,
+    user_id: int,
+) -> Account:
     if amount <= 0:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, "Deposit amount must be positive"
         )
+
+    existing = await get_transaction_by_idempotency_key(session, user_id, idempotency_key)
+    if existing:
+        _ensure_same_request(existing, TransactionType.DEPOSIT, None, account_id, amount)
+        return await session.get(Account, account_id)
 
     account = await lock_accounts(session, account_id)
     if account.accountType == AccountType.SYSTEM:
@@ -103,41 +114,60 @@ async def deposit(session: AsyncSession, account_id: int, amount: int) -> Accoun
     system_locked.balance -= amount
     session.add(account)
     transaction = Transaction(
-                idempotency_key=str(uuid4()),
-                type=TransactionType.DEPOSIT,
-                to_account_id=account_id,
+        idempotency_key=idempotency_key,
+        type=TransactionType.DEPOSIT,
+        to_account_id=account_id,
+        amount=amount,
+        initiated_by_user_id=user_id,
+    )
+    try:
+        session.add(transaction)
+        await session.flush()  # Ensure transaction.id is populated before creating ledger entries
+        session.add(
+            LedgerEntry(
+                account_id=system_locked.id,
+                transaction_id=transaction.id,
+                direction=LedgerDirection.debit,
                 amount=amount,
             )
-    session.add(
-        transaction
-    )
-    await session.flush()  # Ensure transaction.id is populated before creating ledger entries
-    session.add(
-        LedgerEntry(
-            account_id=system_locked.id,
-            transaction_id=transaction.id,
-            direction=LedgerDirection.debit,
-            amount=amount,
         )
-    )
-    session.add(
-        LedgerEntry(
-            account_id=account.id,
-            transaction_id=transaction.id,
-            direction=LedgerDirection.credit,
-            amount=amount,
+        session.add(
+            LedgerEntry(
+                account_id=account.id,
+                transaction_id=transaction.id,
+                direction=LedgerDirection.credit,
+                amount=amount,
+            )
         )
-    )
-    await session.commit()
+        await session.commit()
+    except IntegrityError:
+        # A concurrent request with the same key won the race; replay its result.
+        await session.rollback()
+        existing = await get_transaction_by_idempotency_key(session, user_id, idempotency_key)
+        if existing:
+            _ensure_same_request(existing, TransactionType.DEPOSIT, None, account_id, amount)
+            return await session.get(Account, account_id)
+        raise
     await session.refresh(account)
     return account
 
 
-async def withdraw(session: AsyncSession, account_id: int, amount: int) -> Account:
+async def withdraw(
+    session: AsyncSession,
+    account_id: int,
+    amount: int,
+    idempotency_key: str,
+    user_id: int,
+) -> Account:
     if amount <= 0:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, "Withdrawal amount must be positive"
         )
+
+    existing = await get_transaction_by_idempotency_key(session, user_id, idempotency_key)
+    if existing:
+        _ensure_same_request(existing, TransactionType.WITHDRAWAL, account_id, None, amount)
+        return await session.get(Account, account_id)
 
     account = await lock_accounts(session, account_id)
     if account.balance < amount:
@@ -152,32 +182,40 @@ async def withdraw(session: AsyncSession, account_id: int, amount: int) -> Accou
     system_locked.balance += amount
     session.add(account)
     transaction = Transaction(
-            idempotency_key=str(uuid4()),
-            type=TransactionType.WITHDRAWAL,
-            from_account_id=account_id,
-            amount=amount,
-        )
-    session.add(
-        transaction
+        idempotency_key=idempotency_key,
+        type=TransactionType.WITHDRAWAL,
+        from_account_id=account_id,
+        amount=amount,
+        initiated_by_user_id=user_id,
     )
-    await session.flush()  # Ensure transaction.id is populated before creating ledger entries
-    session.add(
-        LedgerEntry(
-            account_id=account.id,
-            transaction_id=transaction.id,
-            direction=LedgerDirection.debit,
-            amount=amount,
+    try:
+        session.add(transaction)
+        await session.flush()  # Ensure transaction.id is populated before creating ledger entries
+        session.add(
+            LedgerEntry(
+                account_id=account.id,
+                transaction_id=transaction.id,
+                direction=LedgerDirection.debit,
+                amount=amount,
+            )
         )
-    )
-    session.add(
-        LedgerEntry(
-            account_id=system_locked.id,
-            transaction_id=transaction.id,
-            direction=LedgerDirection.credit,
-            amount=amount,
+        session.add(
+            LedgerEntry(
+                account_id=system_locked.id,
+                transaction_id=transaction.id,
+                direction=LedgerDirection.credit,
+                amount=amount,
+            )
         )
-    )
-    await session.commit()
+        await session.commit()
+    except IntegrityError:
+        # A concurrent request with the same key won the race; replay its result.
+        await session.rollback()
+        existing = await get_transaction_by_idempotency_key(session, user_id, idempotency_key)
+        if existing:
+            _ensure_same_request(existing, TransactionType.WITHDRAWAL, account_id, None, amount)
+            return await session.get(Account, account_id)
+        raise
     await session.refresh(account)
     return account
 
@@ -189,17 +227,43 @@ async def lock_accounts(session: AsyncSession, account_id: int) -> Account:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
     return account
 
-async def get_transaction_by_idempotency_key(session: AsyncSession, idempotency_key: str) -> Transaction:
+async def get_transaction_by_idempotency_key(
+    session: AsyncSession, user_id: int, idempotency_key: str
+) -> Transaction | None:
+    """Idempotency keys are scoped to the user who initiated the transaction."""
     result = await session.execute(
-        select(Transaction).where(Transaction.idempotency_key == idempotency_key)
+        select(Transaction).where(
+            Transaction.initiated_by_user_id == user_id,
+            Transaction.idempotency_key == idempotency_key,
+        )
     )
-    transaction = result.scalars().first()
-    if not transaction:
-        return None
-    return transaction
+    return result.scalars().first()
+
+
+def _ensure_same_request(
+    existing: Transaction,
+    type: TransactionType,
+    from_account_id: int | None,
+    to_account_id: int | None,
+    amount: int,
+) -> None:
+    """A reused key is only a retry if it describes the same operation."""
+    if (
+        existing.type != type
+        or existing.from_account_id != from_account_id
+        or existing.to_account_id != to_account_id
+        or existing.amount != amount
+    ):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Idempotency key already used with different parameters",
+        )
+
 
 async def transfer(session: AsyncSession, from_account_id: int, to_account_id: int, amount: int, idempotency_key: str, auth_user: User) -> Transaction:
 
+    # Read now: rollback expires auth_user, and async can't lazy-load it afterwards.
+    user_id = auth_user.id
     # Raises 404 if the source account doesn't exist or isn't the caller's.
     await get_account(session, from_account_id, auth_user)
     if from_account_id == to_account_id:
@@ -214,13 +278,10 @@ async def transfer(session: AsyncSession, from_account_id: int, to_account_id: i
         )
 
 
-    existing = await get_transaction_by_idempotency_key(session, idempotency_key)
-    if existing: 
-        if existing.amount == amount and existing.from_account_id == from_account_id and existing.to_account_id == to_account_id and existing.type == TransactionType.TRANSFER:
-            return existing
-        else: 
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST, "Idempotency key already used with different parameters")
+    existing = await get_transaction_by_idempotency_key(session, user_id, idempotency_key)
+    if existing:
+        _ensure_same_request(existing, TransactionType.TRANSFER, from_account_id, to_account_id, amount)
+        return existing
     
     firstId, secondId = sorted([from_account_id, to_account_id])
 
@@ -252,7 +313,7 @@ async def transfer(session: AsyncSession, from_account_id: int, to_account_id: i
         from_account_id=from_account_id,
         to_account_id=to_account_id,
         amount=amount,
-        initiated_by_user_id=auth_user.id,
+        initiated_by_user_id=user_id,
     )
 
     session.add(from_account)
@@ -283,8 +344,9 @@ async def transfer(session: AsyncSession, from_account_id: int, to_account_id: i
     except IntegrityError:
         
         await session.rollback()
-        existing = await get_transaction_by_idempotency_key(session, idempotency_key)
+        existing = await get_transaction_by_idempotency_key(session, user_id, idempotency_key)
         if existing:
+            _ensure_same_request(existing, TransactionType.TRANSFER, from_account_id, to_account_id, amount)
             return existing
         raise
 

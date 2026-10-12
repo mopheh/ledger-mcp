@@ -21,11 +21,19 @@ The system account is how money enters and leaves the ledger. There is one per c
 
 - Deposit: debits the system account and credits the user's account.
 - Withdrawal: debits the user's account and credits the system account.
-- Transfer: debits one user account and credits another in the same currency. Transfers need an idempotency key, so a retried request returns the original transaction instead of moving money twice.
+- Transfer: debits one user account and credits another in the same currency.
+
+Deposits, withdrawals and transfers all take an `idempotency_key`. Keys are scoped to the signed-in user, so two users can use the same string. Retrying with the same key and the same parameters returns the original result instead of moving money twice. Reusing a key with different parameters is rejected with a 400.
 
 Because deposits come out of the system account, its balance goes negative as users are funded. That is expected: it mirrors the total money held by users.
 
 Each of these writes a `transactions` row and two `ledger_entries` rows in one database commit. Accounts are locked with `SELECT ... FOR UPDATE` while they change, in a fixed order to avoid deadlocks. Across the whole table, credits minus debits must be zero.
+
+The database enforces the key rules itself, not just the application:
+
+- `accounts.balance` cannot go negative, except on system accounts.
+- `transactions.amount` and `ledger_entries.amount` must be positive.
+- `ledger_entries` and `transactions` are append-only. A trigger rejects `UPDATE`, `DELETE` and `TRUNCATE` on them, so a mistake has to be fixed by posting a new transaction. This stops application bugs and ad-hoc SQL by mistake. A role that owns the tables can still drop the trigger, so run the app as a role that does not own them if you need protection from the app's own credentials.
 
 ## Authentication
 
@@ -43,8 +51,8 @@ Each of these writes a `transactions` row and two `ledger_entries` rows in one d
 | `GET /users/list-users` | JWT | list users |
 | `POST /accounts/create-account` | JWT | open an account (`user` type only) |
 | `GET /accounts/list-accounts` | JWT | your accounts |
-| `POST /accounts/{id}/deposit` | JWT | fund one of your accounts |
-| `POST /accounts/{id}/withdraw` | JWT | withdraw from one of your accounts |
+| `POST /accounts/{id}/deposit` | JWT | fund one of your accounts (`amount`, `idempotency_key`) |
+| `POST /accounts/{id}/withdraw` | JWT | withdraw from one of your accounts (`amount`, `idempotency_key`) |
 | `POST /accounts/transfer` | API key | move money to another account by account number |
 | `GET /accounts/check-balance` | API key | balance of one of your accounts |
 | `POST /auth/generate-api-key`, `GET /auth/api-keys`, `DELETE /auth/api-keys/{id}` | JWT | manage API keys |
@@ -128,6 +136,19 @@ The key belongs to one user, so the tools only reach that user's accounts. They 
 
 `test.py` is a minimal client for the same thing. Put an API key in `YOUR_API_TOKEN`; the balance route does not accept a JWT.
 
+## Tests
+
+Run these from `ledger/`. The tests rebuild the schema with the real migrations and then `TRUNCATE` every table, so they need their own empty Postgres database. The name must contain `test`, and they never read `DATABASE_URL` from `.env.local`.
+
+```
+createdb ledger_test
+TEST_DATABASE_URL=postgresql+psycopg://localhost/ledger_test python -m pytest
+```
+
+Without `TEST_DATABASE_URL` every test is skipped. They cover idempotency (replays, mismatched reuse, per-user scoping, concurrent duplicates), ledger invariants (balances net to zero, debits equal credits, balances match posted entries), the deposit/withdraw API, and a check that the models match the migrated schema.
+
+CI (`.github/workflows/ci.yml`) runs the same suite against a Postgres service container.
+
 ## Migrations
 
 The API does not create tables on startup. Schema changes go through Alembic.
@@ -146,4 +167,3 @@ After adding or changing a model:
 - A retried MCP transfer is a new transfer. The MCP server makes a new idempotency key on every call, so only retries inside the API are deduplicated.
 - `mcp-server/test.py` contains a hard-coded JWT, and that file is in git history. It should read the key from an environment variable instead.
 - The MCP server binds to `0.0.0.0` and has no TLS. Anyone who can reach port 8080 can try keys against it.
-- There are no automated tests yet.
