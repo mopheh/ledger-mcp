@@ -129,4 +129,5 @@ async def transfer_funds(
 if __name__ == "__main__":
     # streamable-http, not stdio, since you're building a multi-user
     # remote server rather than a single local subprocess
-    mcp.run(transport="streamable-http", host="0.0.0.0", port=8080)
+    mcp.run(transport="streamable-http", host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    
