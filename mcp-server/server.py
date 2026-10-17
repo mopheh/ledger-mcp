@@ -17,10 +17,9 @@ import httpx
 from fastmcp import FastMCP
 from fastmcp.server.dependencies import get_http_headers
 
-LEDGER_API_BASE = "http://localhost:8000"
 
-# Independent of any limit the ledger API itself enforces — this is a
-# separate, MCP-only ceiling on what an LLM-initiated transfer can move.
+LEDGER_API_BASE = os.environ.get("LEDGER_API_URL", "http://localhost:8000").rstrip("/")
+
 MCP_TRANSFER_LIMIT_CENTS = int(os.environ.get("MCP_TRANSFER_LIMIT_CENTS", "10000"))
 
 mcp = FastMCP("ledger-mcp")

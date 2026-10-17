@@ -9,3 +9,4 @@ app = FastAPI(title="Ledger API")
 app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(accounts_router)
+
