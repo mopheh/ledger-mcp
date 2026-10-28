@@ -17,7 +17,7 @@ import psycopg
 import pytest
 import pytest_asyncio
 from fastapi import HTTPException
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 LEDGER_DIR = Path(__file__).resolve().parent.parent
 TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL")
@@ -37,7 +37,7 @@ os.environ["JWT_SECRET"] = "test-secret"
 # Imported after the environment is pinned: app.core.config reads it at import.
 from app.core.database import async_session, engine  # noqa: E402
 from app.modules.accounts import service  # noqa: E402
-from app.modules.accounts.models import Account, AccountType  # noqa: E402
+from app.modules.accounts.models import Account, AccountType, Transaction, TransactionType  # noqa: E402
 from app.modules.users.models import User  # noqa: E402
 
 
@@ -98,9 +98,11 @@ async def clean_db(migrated_db):
 
 @pytest_asyncio.fixture
 async def make_user():
-    async def _make(name: str) -> User:
+    async def _make(name: str, is_admin: bool = False) -> User:
         async with async_session() as session:
-            user = User(name=name, email=f"{name}@example.com", password_hash="x")
+            user = User(
+                name=name, email=f"{name}@example.com", password_hash="x", is_admin=is_admin
+            )
             session.add(user)
             await session.commit()
             await session.refresh(user)
@@ -152,6 +154,34 @@ async def call():
                 return f"{exc.status_code} {exc.detail}"
 
     return _call
+
+
+@pytest_asyncio.fixture
+async def transactions_of():
+    """Fetch committed transactions of one type, oldest first."""
+
+    async def _fetch(type: TransactionType) -> list[Transaction]:
+        async with async_session() as session:
+            result = await session.execute(
+                select(Transaction).where(Transaction.type == type).order_by(Transaction.id)
+            )
+            return list(result.scalars().all())
+
+    return _fetch
+
+
+@pytest_asyncio.fixture
+async def funded_transfer(call, alice, bob, transactions_of):
+    """Alice deposits 1000, then transfers 200 to Bob. Returns the transfer row."""
+    (ua, a), (_, b) = alice, bob
+    await call(service.deposit, a.id, 1000, "d", ua.id)
+    await call(service.transfer, a.id, b.id, 200, "t", ua)
+    return (await transactions_of(TransactionType.TRANSFER))[0]
+
+
+@pytest_asyncio.fixture
+async def admin(make_user):
+    return await make_user("admin", is_admin=True)
 
 
 @pytest_asyncio.fixture

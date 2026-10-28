@@ -97,3 +97,14 @@ async def transfer(
         idempotency_key=data.idempotency_key,
         auth_user=auth_user,
     )
+
+@router.post("/transactions/{transaction_id}/reversal", response_model=TransactionRead)
+async def reverse_transaction(
+    transaction_id: int,
+    data: AccountTransaction,
+    session: AsyncSession = Depends(get_session),
+    auth_user: User = Depends(verify_api_key),
+):
+    return await service.reverse_transaction(
+        session, transaction_id, data.idempotency_key, auth_user
+    )

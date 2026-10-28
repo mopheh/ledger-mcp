@@ -12,6 +12,22 @@ async def test_deposit_replay_applies_once(call, alice, balance):
     assert await balance(acct.id) == 1000
 
 
+async def test_reversal_replay_applies_once(call, admin, alice, bob, funded_transfer, balance):
+    (_, a), (_, b) = alice, bob
+    assert await call(service.reverse_transaction, funded_transfer.id, "r", admin) == "ok"
+    assert await call(service.reverse_transaction, funded_transfer.id, "r", admin) == "ok"
+    assert (await balance(a.id), await balance(b.id)) == (1000, 0)
+
+
+async def test_concurrent_duplicate_reversals_apply_once(call, admin, alice, bob, funded_transfer, balance):
+    (_, a), (_, b) = alice, bob
+    results = await asyncio.gather(
+        *[call(service.reverse_transaction, funded_transfer.id, "race", admin) for _ in range(8)]
+    )
+    assert set(results) == {"ok"}
+    assert (await balance(a.id), await balance(b.id)) == (1000, 0)
+
+
 async def test_deposit_key_reused_with_other_amount_is_rejected(call, alice, balance):
     user, acct = alice
     await call(service.deposit, acct.id, 1000, "k", user.id)

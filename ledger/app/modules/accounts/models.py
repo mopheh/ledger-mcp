@@ -10,10 +10,12 @@ class TransactionType(str, enum.Enum):
     DEPOSIT = "deposit"
     WITHDRAWAL = "withdrawal"
     TRANSFER = "transfer"
+    REVERSAL = "reversal"
 
 class AccountType(str, enum.Enum):
     USER = "user"
     SYSTEM = "system"
+
 
 
 class Account(SQLModel, table=True):
@@ -54,6 +56,10 @@ class Transaction(SQLModel, table=True):
             name="uq_transactions_user_idempotency_key",
         ),
         CheckConstraint("amount > 0", name="ck_transactions_amount_positive"),
+        UniqueConstraint(
+            "reverse_transaction_id",
+            name="uq_transactions_reverse_transaction_id",
+        ),
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -63,6 +69,7 @@ class Transaction(SQLModel, table=True):
     to_account_id: int | None = Field(default=None, foreign_key="accounts.id")
     amount: int
     initiated_by_user_id: int | None = Field(default=None, foreign_key="user.id")
+    reverse_transaction_id: int | None = Field(default=None, foreign_key="transactions.id")
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )

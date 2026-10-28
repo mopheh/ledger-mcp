@@ -246,6 +246,7 @@ def _ensure_same_request(
     from_account_id: int | None,
     to_account_id: int | None,
     amount: int,
+    reverse_transaction_id: int | None = None,
 ) -> None:
     """A reused key is only a retry if it describes the same operation."""
     if (
@@ -253,6 +254,7 @@ def _ensure_same_request(
         or existing.from_account_id != from_account_id
         or existing.to_account_id != to_account_id
         or existing.amount != amount
+        or existing.reverse_transaction_id != reverse_transaction_id
     ):
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
@@ -352,6 +354,112 @@ async def transfer(session: AsyncSession, from_account_id: int, to_account_id: i
 
     await session.refresh(record)
     return record
+
+
+async def reverse_transaction(session: AsyncSession, transaction_id: int, idempotency_key: str, auth_user: User) -> Transaction:
+    if not auth_user.is_admin:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "Only admin users can reverse transactions"
+        )
+    # Read now: rollback expires every loaded object, and async can't lazy-load them afterwards.
+    user_id = auth_user.id
+    original = await get_transaction(session, transaction_id)
+    original_id = original.id
+    original_type = original.type
+    original_from_id = original.from_account_id
+    original_to_id = original.to_account_id
+    amount = original.amount
+
+    existing = await get_transaction_by_idempotency_key(session, user_id, idempotency_key)
+    if existing:
+        _ensure_same_request(existing, TransactionType.REVERSAL, original_to_id, original_from_id, amount, original_id)
+        return existing
+    if original_type == TransactionType.REVERSAL:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "Cannot reverse a reversal transaction"
+        )
+    if original_type in (TransactionType.DEPOSIT, TransactionType.WITHDRAWAL):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "Cannot reverse a deposit or withdrawal transaction"
+        )
+
+    # Lock the accounts involved in the original transaction
+    firstId, secondId = sorted([original_from_id, original_to_id])
+    locked = {firstId: await lock_accounts(session, firstId), secondId: await lock_accounts(session, secondId)}
+    from_account = locked[original_from_id]
+    to_account = locked[original_to_id]
+
+    # Both checks below run after the locks: concurrent reversals of the same transaction
+    # queue on them. A retry that waited behind the winner replays its result, not a 409.
+    existing = await get_transaction_by_idempotency_key(session, user_id, idempotency_key)
+    if existing:
+        _ensure_same_request(existing, TransactionType.REVERSAL, original_to_id, original_from_id, amount, original_id)
+        return existing
+    if await _find_reversal_id(session, original_id) is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "This transaction has already been reversed"
+        )
+
+    if to_account.balance < amount:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Insufficient funds to reverse the transaction")
+
+    # Perform the reversal
+    to_account.balance -= amount
+    from_account.balance += amount
+
+    reversal_record = Transaction(
+        idempotency_key=idempotency_key,
+        type=TransactionType.REVERSAL,
+        from_account_id=original_to_id,
+        to_account_id=original_from_id,
+        amount=amount,
+        initiated_by_user_id=user_id,
+        reverse_transaction_id=original_id,
+    )
+
+    session.add(from_account)
+    session.add(to_account)
+
+    try:
+        session.add(reversal_record)
+        await session.flush()  # Ensure reversal_record.id is populated before creating ledger entries
+        session.add(
+                LedgerEntry(
+                    account_id=to_account.id,
+                    transaction_id=reversal_record.id,
+                    direction=LedgerDirection.debit,
+                    amount=amount,
+                )
+            )
+        session.add(
+                LedgerEntry(
+                    account_id=from_account.id,
+                    transaction_id=reversal_record.id,
+                    direction=LedgerDirection.credit,
+                    amount=amount,
+                )
+            )
+        await session.commit()
+        await session.refresh(reversal_record)
+        return reversal_record
+    except IntegrityError:
+        await session.rollback()
+        existing = await get_transaction_by_idempotency_key(session, user_id, idempotency_key)
+        if existing:
+            _ensure_same_request(existing, TransactionType.REVERSAL, original_to_id, original_from_id, amount, original_id)
+            return existing
+        if await _find_reversal_id(session, original_id) is not None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT, "This transaction has already been reversed"
+            )
+        raise
+
+
+async def _find_reversal_id(session: AsyncSession, original_id: int) -> int | None:
+    result = await session.execute(
+        select(Transaction.id).where(Transaction.reverse_transaction_id == original_id)
+    )
+    return result.scalars().first()
 
 
 async def get_transaction(session: AsyncSession, transaction_id: int) -> Transaction:
