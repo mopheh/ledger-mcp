@@ -326,10 +326,12 @@ async def transfer(session: AsyncSession, from_account_id: int, to_account_id: i
     try:
         session.add(record)
         await session.flush()  # Ensure record.id is populated before creating ledger entries
+        transaction_id = record.id
+        assert transaction_id is not None
         session.add(
                 LedgerEntry(
                     account_id=from_account.id,
-                    transaction_id=record.id,
+                transaction_id=transaction_id,
                     direction=LedgerDirection.debit,
                     amount=amount,
                 )
@@ -337,7 +339,7 @@ async def transfer(session: AsyncSession, from_account_id: int, to_account_id: i
         session.add(
                 LedgerEntry(
                     account_id=to_account.id,
-                    transaction_id=record.id,
+                    transaction_id=transaction_id,
                     direction=LedgerDirection.credit,
                     amount=amount,
                 )
@@ -384,6 +386,7 @@ async def reverse_transaction(session: AsyncSession, transaction_id: int, idempo
         )
 
     # Lock the accounts involved in the original transaction
+    assert original_from_id is not None and original_to_id is not None
     firstId, secondId = sorted([original_from_id, original_to_id])
     locked = {firstId: await lock_accounts(session, firstId), secondId: await lock_accounts(session, secondId)}
     from_account = locked[original_from_id]

@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy import CheckConstraint
+from sqlalchemy.orm import declared_attr
 from sqlmodel import SQLModel, Field, UniqueConstraint
 
 
@@ -47,7 +48,9 @@ class Account(SQLModel, table=True):
 
 
 class Transaction(SQLModel, table=True):
-    __tablename__ = "transactions"
+    @declared_attr.directive
+    def __tablename__(cls) -> str:
+        return "transactions"
     # Keys are scoped per user: two users may reuse the same key string.
     __table_args__ = (
         UniqueConstraint(
