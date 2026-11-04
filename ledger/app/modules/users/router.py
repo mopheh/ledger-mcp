@@ -13,7 +13,7 @@ from app.modules.users.schemas import (
 )
 
 router = APIRouter(
-    prefix="/users",
+    prefix="/uses",
     tags=["users"],
     responses={404: {"description": "Not found"}},
 )
